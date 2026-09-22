@@ -22,7 +22,7 @@ func (s *Storage) Set[T any](val T) {
 // Get returns the value.
 func (s *Storage) Get[T any]() (T, bool) {
 	var val T
-	v, ok := s.storage[reflect.TypeOf((*T)(nil)).Elem()]
+	v, ok := s.storage[reflect.TypeFor[T]()]
 	if !ok {
 		return val, false
 	}

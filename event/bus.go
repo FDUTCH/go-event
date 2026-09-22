@@ -19,17 +19,25 @@ func NewBus() *Bus {
 	}
 }
 
-// Subscribe subscribes to event.
+// Subscribe subscribes to event with minimal priority.
 func (bus *Bus) Subscribe[T any](listener func(ev T)) {
+	bus.SubscribeWithPriority(listener, 0)
+}
+
+// SubscribeWithPriority subscribes to event with priority passed.
+func (bus *Bus) SubscribeWithPriority[T any](listener func(ev T), priority uint32) {
 	bus.mu.Lock()
 	defer bus.mu.Unlock()
 
-	eventType := reflect.TypeOf((*T)(nil)).Elem()
+	eventType := reflect.TypeFor[T]()
 	handlers, ok := bus.handlers[eventType]
 	if ok {
-		bus.handlers[eventType] = append(handlers.([]func(T)), listener)
+		queue := handlers.(*priorityQueue[T])
+		queue.add(listener, priority)
 	} else {
-		bus.handlers[eventType] = []func(T){listener}
+		q := new(priorityQueue[T])
+		q.add(listener, priority)
+		bus.handlers[eventType] = q
 	}
 }
 
@@ -38,16 +46,13 @@ func (bus *Bus) Unsubscribe[T any](fn func(ev T)) {
 	bus.mu.Lock()
 	defer bus.mu.Unlock()
 
-	// there a way to shoot your self in the foot, but idc.
-	eventType := reflect.TypeOf((*T)(nil)).Elem()
-	addr := reflect.ValueOf(fn).Pointer()
-	handlers, ok := bus.handlers[eventType]
+	eventType := reflect.TypeFor[T]()
+	queue, ok := bus.handlers[eventType]
 	if !ok {
 		return
 	}
-	bus.handlers[eventType] = slices.DeleteFunc(handlers.([]func(T)), func(a func(T)) bool {
-		return addr == reflect.ValueOf(a).Pointer()
-	})
+	queue.(*priorityQueue[T]).delete(fn)
+
 }
 
 // Publish publishes event to the Bus.
@@ -60,10 +65,47 @@ func (bus *Bus) Publish[T any](event T) {
 		return
 	}
 
-	handlers := slices.Clone(rawHandlers.([]func(T)))
+	handlers := slices.Clone(rawHandlers.(*priorityQueue[T]).callers)
 	bus.mu.RUnlock()
 
-	for _, h := range handlers {
-		h(event)
+	for i := range handlers {
+		handlers[i].fn(event)
 	}
+}
+
+type priorityQueue[T any] struct {
+	callers       []caller[T]
+	globalCounter uint32
+}
+
+func (q *priorityQueue[T]) add(fn func(T), priority uint32) {
+	toInsert := caller[T]{
+		priority: (uint64(priority) << 32) + uint64(q.globalCounter),
+		fn:       fn,
+	}
+	if len(q.callers) == 0 {
+		q.callers = []caller[T]{toInsert}
+		return
+	}
+
+	for idx, ca := range q.callers {
+		if ca.priority < toInsert.priority {
+			q.callers = slices.Insert(q.callers, idx, toInsert)
+			break
+		}
+	}
+
+	q.globalCounter++ // don't know if I really should keep this.
+}
+
+func (q *priorityQueue[T]) delete(fn func(T)) {
+	addr := reflect.ValueOf(fn).Pointer()
+	q.callers = slices.DeleteFunc(q.callers, func(a caller[T]) bool {
+		return addr == reflect.ValueOf(a.fn).Pointer()
+	})
+}
+
+type caller[T any] struct {
+	priority uint64
+	fn       func(T)
 }
